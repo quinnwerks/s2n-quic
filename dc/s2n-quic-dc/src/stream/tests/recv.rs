@@ -14,6 +14,7 @@ use crate::{
         TransportFeatures,
     },
 };
+use core::cell::Cell;
 use s2n_codec::{DecoderBufferMut, EncoderBuffer};
 use s2n_quic_core::{
     buffer::{reader::incremental::Incremental, Reassembler},
@@ -497,7 +498,7 @@ struct UdpHarness {
     stream_id: stream::Id,
     clock: clock::Clock,
     sealer: awslc::seal::Application,
-    opener: awslc::open::Application,
+    opener: CountingOpener,
     out_buf: Reassembler,
 }
 
@@ -516,7 +517,7 @@ impl UdpHarness {
             stream_id,
             clock,
             sealer: sealer(),
-            opener: opener(),
+            opener: CountingOpener::new(),
             out_buf: Reassembler::default(),
         }
     }
@@ -527,6 +528,17 @@ impl UdpHarness {
         stream_offset: u64,
         payload: &[u8],
         is_fin: bool,
+    ) -> Vec<u8> {
+        self.encode_packet_with_control_data(pn, stream_offset, payload, is_fin, &[])
+    }
+
+    fn encode_packet_with_control_data(
+        &self,
+        pn: u64,
+        stream_offset: u64,
+        payload: &[u8],
+        is_fin: bool,
+        control_data: &[u8],
     ) -> Vec<u8> {
         let mut buf = vec![0u8; 1024];
         let encoder_buf = EncoderBuffer::new(&mut buf);
@@ -543,8 +555,8 @@ impl UdpHarness {
             VarInt::ZERO,
             VarInt::ZERO,
             &mut &[][..],
-            VarInt::ZERO,
-            &(),
+            VarInt::new(control_data.len() as u64).unwrap(),
+            &control_data,
             &mut reader,
             &self.sealer,
             &self.credentials,
@@ -607,6 +619,118 @@ impl UdpHarness {
                 &publisher,
             )
             .map_err(|e| e.kind)
+    }
+}
+
+struct CountingOpener {
+    inner: awslc::open::Application,
+    copies: Cell<usize>,
+    in_place: Cell<usize>,
+}
+
+impl CountingOpener {
+    fn new() -> Self {
+        Self {
+            inner: opener(),
+            copies: Cell::new(0),
+            in_place: Cell::new(0),
+        }
+    }
+}
+
+impl crypto::open::Application for CountingOpener {
+    fn tag_len(&self) -> usize {
+        self.inner.tag_len()
+    }
+
+    fn decrypt(
+        &self,
+        key_phase: crypto::KeyPhase,
+        packet_number: u64,
+        header: &[u8],
+        payload_in: &[u8],
+        tag: &[u8],
+        payload_out: &mut crypto::UninitSlice,
+    ) -> crypto::open::Result {
+        self.copies.set(self.copies.get() + 1);
+        self.inner.decrypt(
+            key_phase,
+            packet_number,
+            header,
+            payload_in,
+            tag,
+            payload_out,
+        )
+    }
+
+    fn decrypt_in_place(
+        &self,
+        key_phase: crypto::KeyPhase,
+        packet_number: u64,
+        header: &[u8],
+        payload: &mut [u8],
+        tag: &[u8],
+    ) -> crypto::open::Result {
+        self.in_place.set(self.in_place.get() + 1);
+        self.inner
+            .decrypt_in_place(key_phase, packet_number, header, payload, tag)
+    }
+}
+
+#[test]
+fn udp_retransmission_of_buffered_data_is_recorded() {
+    let mut h = UdpHarness::new();
+    let mut packet = h.encode_packet_at_offset(0, 0, b"0123456789", false);
+    h.feed(&mut packet).unwrap();
+
+    // Leave a gap so the retransmitted payload remains in the reassembler.
+    let mut packet = h.encode_packet_at_offset(2, 20, b"abcdefghij", false);
+    h.feed(&mut packet).unwrap();
+    let mut packet = h.encode_packet_at_offset(3, 20, b"abcdefghij", false);
+    h.feed(&mut packet.clone()).unwrap();
+
+    assert!(matches!(
+        h.feed(&mut packet),
+        Err(recv::ErrorKind::Duplicate)
+    ));
+}
+
+#[test]
+fn udp_forged_copy_of_buffered_data_rejected_by_aead() {
+    let mut h = UdpHarness::new();
+    let mut packet = h.encode_packet_at_offset(0, 0, b"0123456789", false);
+    h.feed(&mut packet).unwrap();
+
+    let mut packet = h.encode_packet_at_offset(2, 20, b"abcdefghij", false);
+    h.feed(&mut packet).unwrap();
+    let mut forged = h.encode_packet_at_offset(3, 20, b"abcdefghij", false);
+    let tag_start = forged.len() - h.opener.tag_len();
+    forged[tag_start..].fill(0);
+
+    assert!(matches!(
+        h.feed(&mut forged),
+        Err(recv::ErrorKind::Crypto(_))
+    ));
+}
+
+#[test]
+fn udp_direct_copy_is_authenticated_once() {
+    let mut h = UdpHarness::new();
+    let mut packet = h.encode_packet_at_offset(0, 0, b"0123456789", false);
+    h.feed(&mut packet).unwrap();
+
+    assert_eq!(h.opener.copies.get(), 1);
+    assert_eq!(h.opener.in_place.get(), 0);
+}
+
+#[test]
+fn udp_control_error_does_not_reopen_authenticated_payload() {
+    for payload in [b"payload".as_slice(), b"".as_slice()] {
+        let mut h = UdpHarness::new();
+        let mut packet = h.encode_packet_with_control_data(0, 0, payload, false, &[0xff]);
+        assert!(matches!(h.feed(&mut packet), Err(recv::ErrorKind::Decode)));
+
+        assert_eq!(h.opener.copies.get() + h.opener.in_place.get(), 1);
     }
 }
 
