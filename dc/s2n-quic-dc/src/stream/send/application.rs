@@ -42,6 +42,7 @@ where
     pacer: pacer::Naive,
     status: Status,
     runtime: runtime::ArcHandle<Sub>,
+    lazy_worker_wake: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -324,14 +325,28 @@ where
             },
         )?;
 
+        let lazy_wake = batch.is_some() && self.lazy_worker_wake;
+
         if let Some(batch) = batch {
             // send the transmission information off to the worker before flushing to the socket so the
             // worker is prepared to handle ACKs from the peer
-            self.shared.sender.push_to_worker(batch)?;
+            if lazy_wake {
+                self.shared.sender.push_to_worker_without_wake(batch);
+            } else {
+                self.shared.sender.push_to_worker(batch)?;
+            }
         }
 
         // flush the queue of packets to the socket
-        self.poll_flush_buffer(cx, usize::MAX)
+        let res = self.poll_flush_buffer(cx, usize::MAX);
+
+        // the batch is already queued, so the worker only needs the wake to arm its timers; doing
+        // it after the sendmsg keeps the futex wake off the request's path
+        if lazy_wake {
+            self.shared.sender.worker_waker.wake();
+        }
+
+        res
     }
 
     #[inline]

@@ -41,6 +41,11 @@ pub trait Environment {
     fn writer_rt(&self) -> runtime::ArcHandle<Self::Subscriber>;
     fn spawn_writer<F: 'static + Send + Future<Output = ()>>(&self, f: F);
 
+    #[inline]
+    fn lazy_worker_wake(&self) -> bool {
+        false
+    }
+
     /// Creates an endpoint publisher with the environment's subscriber
     #[inline]
     fn endpoint_publisher(&self) -> event::EndpointPublisherSubscriber<'_, Self::Subscriber> {
@@ -120,6 +125,13 @@ where
         match self {
             Either::A(a) => a.spawn_writer(f),
             Either::B(b) => b.spawn_writer(f),
+        }
+    }
+
+    fn lazy_worker_wake(&self) -> bool {
+        match self {
+            Either::A(a) => a.lazy_worker_wake(),
+            Either::B(b) => b.lazy_worker_wake(),
         }
     }
 }

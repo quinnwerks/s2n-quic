@@ -35,8 +35,22 @@ pub fn blocking<S: AsRawFd, R: Router>(socket: S, mut alloc: pool::Pool, mut rou
 
 /// Receives packets from a non-blocking [`std::net::UdpSocket`] and dispatches into the provided [`Router`]
 pub async fn non_blocking<S: Socket, R: Router>(socket: S, mut alloc: pool::Pool, mut router: R) {
+    non_blocking_while(&socket, &mut alloc, &mut router, || true).await;
+}
+
+/// Like [`non_blocking`], but returns `true` as soon as `keep` returns `false` on a wakeup, so the
+/// caller can resume receiving elsewhere
+pub async fn non_blocking_while<S: Socket, R: Router>(
+    socket: &S,
+    alloc: &mut pool::Pool,
+    router: &mut R,
+    mut keep: impl FnMut() -> bool,
+) -> bool {
     let mut pending = None;
     core::future::poll_fn(move |cx| {
+        if !keep() {
+            return Poll::Ready(true);
+        }
         while router.is_open() {
             let unfilled = pending.take().unwrap_or_else(|| alloc.alloc_or_grow());
 
@@ -79,7 +93,7 @@ pub async fn non_blocking<S: Socket, R: Router>(socket: S, mut alloc: pool::Pool
             }
         }
 
-        Poll::Ready(())
+        Poll::Ready(false)
     })
-    .await;
+    .await
 }

@@ -1,7 +1,10 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::udp::{ApplicationSocket, RecvSocket, WorkerSocket};
+use super::{
+    adaptive::Placement,
+    udp::{ApplicationSocket, RecvSocket, WorkerSocket},
+};
 use crate::{
     credentials::Credentials,
     event,
@@ -102,6 +105,14 @@ impl Pool {
             ($create_router:expr) => {
                 if config.blocking {
                     Self::spawn_blocking(&sockets, create_packets, $create_router)
+                } else if let Some(placement) = &env.placement {
+                    Self::spawn_adaptive(
+                        &sockets,
+                        placement,
+                        &env.reader_rt,
+                        create_packets,
+                        $create_router,
+                    );
                 } else {
                     let _rt = env.reader_rt.enter();
                     Self::spawn_non_blocking(&sockets, create_packets, $create_router)?;
@@ -195,6 +206,28 @@ impl Pool {
         }
     }
 
+    fn spawn_adaptive<R>(
+        sockets: &[Socket],
+        placement: &Arc<Placement>,
+        dedicated: &tokio::runtime::Handle,
+        create_packets: impl Fn() -> Packets,
+        create_router: impl Fn(&Packets, &Socket) -> R,
+    ) where
+        R: 'static + Send + Router,
+    {
+        for socket in sockets.iter() {
+            let packets = create_packets();
+            let router = create_router(&packets, socket);
+            spawn_adaptive_reader(
+                placement.clone(),
+                dedicated.clone(),
+                socket.recv_socket.clone(),
+                packets,
+                router,
+            );
+        }
+    }
+
     fn spawn_non_blocking<R>(
         sockets: &[Socket],
         create_packets: impl Fn() -> Packets,
@@ -273,4 +306,39 @@ impl Pool {
 
         Ok(sockets)
     }
+}
+
+fn spawn_adaptive_reader<R>(
+    placement: Arc<Placement>,
+    dedicated: tokio::runtime::Handle,
+    socket: RecvSocket,
+    mut packets: Packets,
+    mut router: R,
+) where
+    R: 'static + Send + Router,
+{
+    let (handle, inline) = placement.handle(&dedicated);
+    let handle = handle.clone();
+    handle.spawn(async move {
+        // the fd has to be registered with the reactor of the runtime that polls it, otherwise
+        // that reactor's thread does the wake and the hop comes back
+        let fd = match unsafe {
+            // SAFETY: the Arc keeps the socket alive, so its fd is stable until drop.
+            AsyncFd::register(socket.clone())
+        } {
+            Ok(fd) => fd,
+            Err(err) => {
+                tracing::error!("failed to register udp socket: {err}");
+                return;
+            }
+        };
+        let moved = udp::non_blocking_while(&fd, &mut packets, &mut router, || {
+            placement.refresh() == inline
+        })
+        .await;
+        drop(fd);
+        if moved {
+            spawn_adaptive_reader(placement, dedicated, socket, packets, router);
+        }
+    });
 }

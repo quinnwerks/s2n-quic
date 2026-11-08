@@ -16,6 +16,7 @@ where
     Sub: event::Subscriber,
 {
     runtime: runtime::ArcHandle<Sub>,
+    lazy_worker_wake: bool,
 }
 
 impl<Sub> Builder<Sub>
@@ -24,12 +25,24 @@ where
 {
     #[inline]
     pub fn new(runtime: runtime::ArcHandle<Sub>) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            lazy_worker_wake: false,
+        }
+    }
+
+    #[inline]
+    pub fn with_lazy_worker_wake(mut self, enabled: bool) -> Self {
+        self.lazy_worker_wake = enabled;
+        self
     }
 
     #[inline]
     pub fn build(self, shared: ArcShared<Sub>, sockets: socket::ArcApplication) -> Writer<Sub> {
-        let Self { runtime } = self;
+        let Self {
+            runtime,
+            lazy_worker_wake,
+        } = self;
         Writer(Box::new(Inner {
             shared,
             sockets,
@@ -37,6 +50,7 @@ where
             pacer: Default::default(),
             status: Default::default(),
             runtime,
+            lazy_worker_wake,
         }))
     }
 }

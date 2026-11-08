@@ -404,7 +404,8 @@ where
     }
 
     let read = recv::application::Builder::new(endpoint_type, env.reader_rt());
-    let write = send::application::Builder::new(env.writer_rt());
+    let write = send::application::Builder::new(env.writer_rt())
+        .with_lazy_worker_wake(env.lazy_worker_wake());
 
     let stream = application::Builder {
         read,

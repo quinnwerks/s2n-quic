@@ -103,6 +103,13 @@ impl State {
         Ok(())
     }
 
+    #[inline]
+    pub fn push_to_worker_without_wake(&self, transmissions: Vec<Transmission>) {
+        trace!(event = "transmission", len = transmissions.len());
+        self.application_transmission_queue
+            .push_batch(transmissions);
+    }
+
     pub fn on_prune(&self) {
         self.shutdown(Default::default(), ShutdownKind::Pruned);
     }

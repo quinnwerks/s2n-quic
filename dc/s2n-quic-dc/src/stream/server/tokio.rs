@@ -151,6 +151,8 @@ pub struct Builder {
     reuse_addr: Option<bool>,
     tls: Option<tcp::tls::Builder>,
     attach_reuseport_ebpf: Option<Arc<OwnedFd>>,
+    adaptive_placement: Option<(tokio::runtime::Handle, env::adaptive::Thresholds)>,
+    lazy_worker_wake: bool,
 }
 
 impl Default for Builder {
@@ -175,6 +177,8 @@ impl Default for Builder {
             reuse_addr: None,
             tls: None,
             attach_reuseport_ebpf: None,
+            adaptive_placement: None,
+            lazy_worker_wake: false,
         }
     }
 }
@@ -276,6 +280,27 @@ impl Builder {
         self
     }
 
+    /// Runs stream workers and pooled socket readers on `handle`'s runtime (usually the
+    /// application's) while its busy ratio stays below `thresholds`, which avoids a cross-thread
+    /// wake on every packet. They move back to the dedicated background runtimes when it gets busy.
+    ///
+    /// The runtime behind `handle` must outlive the server.
+    pub fn with_adaptive_placement(
+        mut self,
+        handle: tokio::runtime::Handle,
+        thresholds: env::adaptive::Thresholds,
+    ) -> Self {
+        self.adaptive_placement = Some((handle, thresholds));
+        self
+    }
+
+    /// Wakes a stream's worker after its write has been flushed to the socket rather than before,
+    /// which takes the wake off the write's latency.
+    pub fn with_lazy_worker_wake(mut self, enabled: bool) -> Self {
+        self.lazy_worker_wake = enabled;
+        self
+    }
+
     pub fn build<H: Handshake + Clone, S: event::Subscriber + Clone>(
         mut self,
         handshake: H,
@@ -304,7 +329,11 @@ impl Builder {
 
         let mut env = env::Builder::new(subscriber)
             .with_threads(concurrency)
-            .with_acceptor(stream_sender.clone());
+            .with_acceptor(stream_sender.clone())
+            .with_lazy_worker_wake(self.lazy_worker_wake);
+        if let Some((handle, thresholds)) = self.adaptive_placement.take() {
+            env = env.with_adaptive_placement(handle, thresholds);
+        }
 
         let enable_udp_pool = true;
 

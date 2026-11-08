@@ -14,6 +14,7 @@ use crate::{
 use s2n_quic_platform::features;
 use std::{io, net::SocketAddr, sync::Arc};
 
+pub mod adaptive;
 pub mod pool;
 pub mod tcp;
 pub mod udp;
@@ -31,6 +32,8 @@ where
     threads: Option<usize>,
     pool: Option<PoolConfig>,
     acceptor: Option<accept::Sender<Sub>>,
+    adaptive: Option<(tokio::runtime::Handle, adaptive::Thresholds)>,
+    lazy_worker_wake: bool,
     subscriber: Sub,
 }
 
@@ -58,6 +61,8 @@ where
             threads: None,
             acceptor: None,
             pool: None,
+            adaptive: None,
+            lazy_worker_wake: false,
             subscriber,
         }
     }
@@ -69,6 +74,23 @@ where
 
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = Some(threads);
+        self
+    }
+
+    /// Runs stream workers and pooled socket readers on `handle`'s runtime while it has spare
+    /// capacity, falling back to the dedicated runtimes when it is busy
+    pub fn with_adaptive_placement(
+        mut self,
+        handle: tokio::runtime::Handle,
+        thresholds: adaptive::Thresholds,
+    ) -> Self {
+        self.adaptive = Some((handle, thresholds));
+        self
+    }
+
+    /// Wakes the stream worker after a write is flushed to the socket instead of before
+    pub fn with_lazy_worker_wake(mut self, enabled: bool) -> Self {
+        self.lazy_worker_wake = enabled;
         self
     }
 
@@ -99,6 +121,8 @@ where
             threads,
             pool,
             acceptor,
+            adaptive,
+            lazy_worker_wake,
             subscriber,
         } = self;
         let clock = clock.unwrap_or_default();
@@ -140,6 +164,9 @@ where
             reader_rt,
             writer_rt,
             recv_pool: None,
+            placement: adaptive
+                .map(|(handle, thresholds)| adaptive::Placement::new(handle, thresholds)),
+            lazy_worker_wake,
             subscriber,
         };
 
@@ -161,6 +188,8 @@ pub struct Environment<Sub> {
     writer_rt: runtime::Shared<Sub>,
     subscriber: Sub,
     recv_pool: Option<Arc<pool::Pool>>,
+    placement: Option<Arc<adaptive::Placement>>,
+    lazy_worker_wake: bool,
 }
 
 impl<Sub> Environment<Sub>
@@ -232,6 +261,15 @@ where
 
     #[inline]
     fn spawn_writer<F: 'static + Send + std::future::Future<Output = ()>>(&self, f: F) {
-        self.writer_rt.spawn(f);
+        if let Some(placement) = &self.placement {
+            adaptive::spawn(placement.clone(), (*self.writer_rt).clone(), Box::pin(f));
+        } else {
+            self.writer_rt.spawn(f);
+        }
+    }
+
+    #[inline]
+    fn lazy_worker_wake(&self) -> bool {
+        self.lazy_worker_wake
     }
 }

@@ -4,6 +4,7 @@
 use super::{testing, Protocol};
 
 mod accept_queue;
+mod adaptive_placement;
 mod api;
 mod behavior;
 /// A set of tests ensuring we support a large number of peers.
