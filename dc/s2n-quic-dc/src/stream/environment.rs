@@ -36,6 +36,11 @@ pub trait Environment {
     fn subscriber(&self) -> &Self::Subscriber;
     fn clock(&self) -> Self::Clock;
     fn gso(&self) -> features::Gso;
+
+    #[inline]
+    fn ack_mode(&self) -> recv::shared::AckMode {
+        Default::default()
+    }
     fn reader_rt(&self) -> runtime::ArcHandle<Self::Subscriber>;
     fn spawn_reader<F: 'static + Send + Future<Output = ()>>(&self, f: F);
     fn writer_rt(&self) -> runtime::ArcHandle<Self::Subscriber>;
@@ -92,6 +97,13 @@ where
         match self {
             Either::A(a) => a.gso(),
             Either::B(b) => b.gso(),
+        }
+    }
+
+    fn ack_mode(&self) -> recv::shared::AckMode {
+        match self {
+            Either::A(a) => a.ack_mode(),
+            Either::B(b) => b.ack_mode(),
         }
     }
 

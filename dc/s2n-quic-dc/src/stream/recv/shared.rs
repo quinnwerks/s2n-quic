@@ -35,7 +35,7 @@ use s2n_quic_core::{
 use std::{
     io,
     sync::{
-        atomic::{AtomicU64, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Mutex, MutexGuard,
     },
 };
@@ -50,6 +50,12 @@ pub enum AckMode {
     Application,
     /// The worker task is sending ACKs
     Worker,
+    /// A task spawned on the reading task's runtime sends ACKs, after the read has returned.
+    ///
+    /// Intended for clients, which yield soon after a read so the spawned task runs promptly. A
+    /// server that handles the request before yielding holds the ACK back and can trigger
+    /// spurious retransmissions on the peer.
+    Deferred,
 }
 
 pub enum ApplicationState {
@@ -105,6 +111,8 @@ pub struct State {
     application_state: AtomicU8,
     pub worker_waker: WorkerWaker,
     is_owned_socket: bool,
+    deferred_ack: AtomicBool,
+    deferred_ack_buffer: Mutex<Option<msg::send::Message>>,
 }
 
 impl State {
@@ -137,6 +145,8 @@ impl State {
             application_state: AtomicU8::new(0),
             worker_waker: Default::default(),
             is_owned_socket,
+            deferred_ack: AtomicBool::new(false),
+            deferred_ack_buffer: Mutex::new(None),
         }
     }
 
@@ -156,7 +166,7 @@ impl State {
         ack_mode: AckMode,
         send_buffer: &'a mut msg::send::Message,
         shared: &'a ArcShared<Sub>,
-        sockets: &'a dyn socket::Application,
+        sockets: &'a socket::ArcApplication,
     ) -> io::Result<AppGuard<'a, Sub>>
     where
         Sub: event::Subscriber,
@@ -180,6 +190,7 @@ impl State {
             shared,
             sockets,
             initial_state,
+            defer_ack: false,
         })
     }
 
@@ -266,8 +277,9 @@ where
     ack_mode: AckMode,
     send_buffer: &'a mut msg::send::Message,
     shared: &'a ArcShared<Sub>,
-    sockets: &'a dyn socket::Application,
+    sockets: &'a socket::ArcApplication,
     initial_state: state::Receiver,
+    defer_ack: bool,
 }
 
 impl<Sub> AppGuard<'_, Sub>
@@ -286,8 +298,17 @@ where
             false
         );
 
-        match self.ack_mode {
-            AckMode::Application => {
+        let ack_mode = match self.ack_mode {
+            AckMode::Deferred if deferred_ack::can_spawn() => {
+                self.defer_ack = self.inner.receiver.should_transmit();
+                return false;
+            }
+            AckMode::Deferred => AckMode::Application,
+            ack_mode => ack_mode,
+        };
+
+        match ack_mode {
+            AckMode::Application | AckMode::Deferred => {
                 self.inner
                     .fill_transmit_queue(self.shared, self.send_buffer);
 
@@ -352,6 +373,10 @@ where
 
         if wake_worker_for_ack && !current_state.is_terminal() {
             // TODO wake the worker
+        }
+
+        if self.defer_ack {
+            deferred_ack::schedule(self.shared, self.sockets);
         }
 
         // no need to look at anything if the state didn't change
@@ -751,5 +776,79 @@ where
         ensure!(self.any_valid_packets);
         self.shared
             .on_valid_packet(&self.remote_addr, self.remote_queue_id, self.handshake);
+    }
+}
+
+mod deferred_ack {
+    use super::*;
+
+    #[cfg(feature = "tokio")]
+    #[inline]
+    pub fn can_spawn() -> bool {
+        tokio::runtime::Handle::try_current().is_ok()
+    }
+
+    #[cfg(not(feature = "tokio"))]
+    #[inline]
+    pub fn can_spawn() -> bool {
+        false
+    }
+
+    #[cfg(feature = "tokio")]
+    #[inline]
+    pub fn schedule<Sub>(shared: &ArcShared<Sub>, sockets: &socket::ArcApplication)
+    where
+        Sub: event::Subscriber,
+    {
+        // ACKs that arrive while a send is pending ride on it, since it encodes the receiver's
+        // latest state when it runs
+        if shared.receiver.deferred_ack.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            shared.receiver.deferred_ack.store(false, Ordering::Release);
+            return;
+        };
+        let shared = shared.clone();
+        let sockets = sockets.clone();
+        handle.spawn(async move { send(&shared, &sockets) });
+    }
+
+    #[cfg(not(feature = "tokio"))]
+    #[inline]
+    pub fn schedule<Sub>(_shared: &ArcShared<Sub>, _sockets: &socket::ArcApplication)
+    where
+        Sub: event::Subscriber,
+    {
+    }
+
+    #[cfg(feature = "tokio")]
+    fn send<Sub>(shared: &ArcShared<Sub>, sockets: &socket::ArcApplication)
+    where
+        Sub: event::Subscriber,
+    {
+        let state = &shared.receiver;
+        state.deferred_ack.store(false, Ordering::Release);
+
+        let Ok(mut buffer) = state.deferred_ack_buffer.lock() else {
+            return;
+        };
+        let send_buffer = buffer.get_or_insert_with(|| {
+            msg::send::Message::new(shared.remote_addr(), shared.gso.clone())
+        });
+
+        {
+            let Ok(mut inner) = state.inner.lock() else {
+                return;
+            };
+            ensure!(!matches!(inner.handshake, handshake::State::ClientInit));
+            inner.fill_transmit_queue(shared, send_buffer);
+        }
+
+        ensure!(!send_buffer.is_empty());
+
+        let _ = sockets.read_application().try_send_buffer(send_buffer);
+
+        let _ = send_buffer.drain();
     }
 }

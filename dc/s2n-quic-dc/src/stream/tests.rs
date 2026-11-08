@@ -9,6 +9,7 @@ mod behavior;
 /// A set of tests ensuring we support a large number of peers.
 #[cfg(future)] // TODO remove this since they're quite expensive
 mod cardinality;
+mod deferred_ack;
 mod deterministic;
 mod fast_fail;
 mod idle_timeout;

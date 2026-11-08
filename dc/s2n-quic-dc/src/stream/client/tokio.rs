@@ -377,6 +377,7 @@ impl<H: Handshake + Clone, S: event::Subscriber + Clone> Client<H, S> {
 pub struct Builder {
     default_protocol: Option<socket::Protocol>,
     background_threads: Option<usize>,
+    ack_mode: Option<recv::application::AckMode>,
     linger: Option<Duration>,
     send_buffer: Option<usize>,
     recv_buffer: Option<usize>,
@@ -412,6 +413,15 @@ impl Builder {
 
     pub fn with_linger(mut self, linger: Duration) -> Self {
         self.linger = Some(linger);
+        self
+    }
+
+    /// Sets who sends the ACKs for data this client receives over UDP.
+    ///
+    /// [`recv::application::AckMode::Deferred`] sends them after the read has returned, which takes the
+    /// ACK's `sendmsg` off the read's latency.
+    pub fn with_ack_mode(mut self, ack_mode: recv::application::AckMode) -> Self {
+        self.ack_mode = Some(ack_mode);
         self
     }
 
@@ -464,6 +474,10 @@ impl Builder {
 
         let pool = udp_pool::Config::new(handshake.map().clone());
         env = env.with_pool(pool);
+
+        if let Some(ack_mode) = self.ack_mode {
+            env = env.with_ack_mode(ack_mode);
+        }
 
         if let Some(threads) = self.background_threads {
             env = env.with_threads(threads);

@@ -14,17 +14,28 @@ use crate::{
 use core::mem::ManuallyDrop;
 use s2n_quic_core::endpoint;
 
-use super::ReadMode;
+use super::{AckMode, ReadMode};
 
 pub struct Builder<Sub> {
     endpoint: endpoint::Type,
     runtime: runtime::ArcHandle<Sub>,
+    ack_mode: AckMode,
 }
 
 impl<Sub> Builder<Sub> {
     #[inline]
     pub fn new(endpoint: endpoint::Type, runtime: runtime::ArcHandle<Sub>) -> Self {
-        Self { endpoint, runtime }
+        Self {
+            endpoint,
+            runtime,
+            ack_mode: AckMode::default(),
+        }
+    }
+
+    #[inline]
+    pub fn with_ack_mode(mut self, ack_mode: AckMode) -> Self {
+        self.ack_mode = ack_mode;
+        self
     }
 }
 
@@ -34,7 +45,11 @@ where
 {
     #[inline]
     pub fn build(self, shared: ArcShared<Sub>, sockets: socket::ArcApplication) -> Reader<Sub> {
-        let Self { endpoint, runtime } = self;
+        let Self {
+            endpoint,
+            runtime,
+            ack_mode,
+        } = self;
 
         let remote_addr = shared.remote_addr();
         // we only need a timer for unreliable transports
@@ -54,7 +69,6 @@ where
         } else {
             ReadMode::UntilFull
         };
-        let ack_mode = Default::default();
         let local_state = match endpoint {
             // reliable transports on the client need to read at least one packet in order to
             // process secret control packets

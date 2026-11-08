@@ -6,6 +6,7 @@ use crate::{
     event,
     stream::{
         environment::udp::Config as PoolConfig,
+        recv::shared::AckMode,
         runtime::{tokio as runtime, ArcHandle},
         server::accept,
         socket,
@@ -25,6 +26,7 @@ where
     clock: Option<Clock>,
     gso: Option<features::Gso>,
     socket_options: Option<socket::Options>,
+    ack_mode: AckMode,
     reader_rt: Option<runtime::Shared<Sub>>,
     writer_rt: Option<runtime::Shared<Sub>>,
     thread_name_prefix: Option<String>,
@@ -52,6 +54,7 @@ where
             clock: None,
             gso: None,
             socket_options: None,
+            ack_mode: AckMode::default(),
             reader_rt: None,
             writer_rt: None,
             thread_name_prefix: None,
@@ -82,6 +85,12 @@ where
         self
     }
 
+    /// Sets who sends ACKs for the streams this environment opens and accepts
+    pub fn with_ack_mode(mut self, ack_mode: AckMode) -> Self {
+        self.ack_mode = ack_mode;
+        self
+    }
+
     pub fn with_acceptor(mut self, sender: accept::Sender<Sub>) -> Self {
         self.acceptor = Some(sender);
         self
@@ -93,6 +102,7 @@ where
             clock,
             gso,
             socket_options,
+            ack_mode,
             reader_rt,
             writer_rt,
             thread_name_prefix,
@@ -137,6 +147,7 @@ where
             clock,
             gso,
             socket_options,
+            ack_mode,
             reader_rt,
             writer_rt,
             recv_pool: None,
@@ -157,6 +168,7 @@ pub struct Environment<Sub> {
     clock: Clock,
     gso: features::Gso,
     socket_options: socket::Options,
+    ack_mode: AckMode,
     reader_rt: runtime::Shared<Sub>,
     writer_rt: runtime::Shared<Sub>,
     subscriber: Sub,
@@ -213,6 +225,11 @@ where
     #[inline]
     fn gso(&self) -> features::Gso {
         self.gso.clone()
+    }
+
+    #[inline]
+    fn ack_mode(&self) -> AckMode {
+        self.ack_mode
     }
 
     #[inline]
