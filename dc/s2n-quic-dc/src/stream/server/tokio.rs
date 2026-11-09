@@ -12,6 +12,7 @@ use crate::{
             tokio::{self as env, Environment},
             udp as udp_pool, Environment as _,
         },
+        recv::application as recv,
         runtime::tokio as runtime,
         server::{accept, stats},
         socket,
@@ -150,6 +151,7 @@ pub struct Builder {
     recv_buffer: Option<usize>,
     reuse_addr: Option<bool>,
     tls: Option<tcp::tls::Builder>,
+    ack_mode: Option<recv::AckMode>,
     attach_reuseport_ebpf: Option<Arc<OwnedFd>>,
 }
 
@@ -174,6 +176,7 @@ impl Default for Builder {
             recv_buffer: None,
             reuse_addr: None,
             tls: None,
+            ack_mode: None,
             attach_reuseport_ebpf: None,
         }
     }
@@ -266,6 +269,15 @@ impl Builder {
         self
     }
 
+    /// Sets who sends the ACKs for data this server receives over UDP.
+    ///
+    /// [`recv::AckMode::Offload`] sends them from a dedicated thread, which takes the ACK's
+    /// `sendmsg` off the read's latency without waiting for the handler to yield.
+    pub fn with_ack_mode(mut self, ack_mode: recv::AckMode) -> Self {
+        self.ack_mode = Some(ack_mode);
+        self
+    }
+
     pub fn with_attach_reuseport_ebpf(mut self, fd: Arc<OwnedFd>) -> Self {
         self.attach_reuseport_ebpf = Some(fd);
         self
@@ -323,6 +335,10 @@ impl Builder {
             pool.accept_flavor = self.accept_flavor;
 
             env = env.with_pool(pool);
+        }
+
+        if let Some(ack_mode) = self.ack_mode {
+            env = env.with_ack_mode(ack_mode);
         }
 
         let env = env.build()?;

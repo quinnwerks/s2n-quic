@@ -404,7 +404,8 @@ where
     }
 
     let read = recv::application::Builder::new(endpoint_type, env.reader_rt())
-        .with_ack_mode(env.ack_mode());
+        .with_ack_mode(env.ack_mode())
+        .with_ack_offload(env.ack_offload());
     let write = send::application::Builder::new(env.writer_rt());
 
     let stream = application::Builder {

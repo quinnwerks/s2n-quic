@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod ack;
+pub mod ack_offload;
 pub mod application;
 pub(crate) mod buffer;
 pub mod dispatch;

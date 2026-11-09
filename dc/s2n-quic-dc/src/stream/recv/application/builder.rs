@@ -5,7 +5,10 @@ use crate::{
     clock::Timer,
     event, msg,
     stream::{
-        recv::application::{Inner, LocalState, Reader},
+        recv::{
+            ack_offload::Offload,
+            application::{Inner, LocalState, Reader},
+        },
         runtime,
         shared::ArcShared,
         socket,
@@ -13,6 +16,7 @@ use crate::{
 };
 use core::mem::ManuallyDrop;
 use s2n_quic_core::endpoint;
+use std::sync::Arc;
 
 use super::{AckMode, ReadMode};
 
@@ -20,6 +24,7 @@ pub struct Builder<Sub> {
     endpoint: endpoint::Type,
     runtime: runtime::ArcHandle<Sub>,
     ack_mode: AckMode,
+    ack_offload: Option<Arc<Offload>>,
 }
 
 impl<Sub> Builder<Sub> {
@@ -29,12 +34,19 @@ impl<Sub> Builder<Sub> {
             endpoint,
             runtime,
             ack_mode: AckMode::default(),
+            ack_offload: None,
         }
     }
 
     #[inline]
     pub fn with_ack_mode(mut self, ack_mode: AckMode) -> Self {
         self.ack_mode = ack_mode;
+        self
+    }
+
+    #[inline]
+    pub fn with_ack_offload(mut self, ack_offload: Option<Arc<Offload>>) -> Self {
+        self.ack_offload = ack_offload;
         self
     }
 }
@@ -49,6 +61,7 @@ where
             endpoint,
             runtime,
             ack_mode,
+            ack_offload,
         } = self;
 
         let remote_addr = shared.remote_addr();
@@ -85,6 +98,7 @@ where
             send_buffer,
             read_mode,
             ack_mode,
+            ack_offload,
             timer,
             local_state,
             runtime,

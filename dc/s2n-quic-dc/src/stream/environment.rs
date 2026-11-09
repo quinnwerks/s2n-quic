@@ -41,6 +41,11 @@ pub trait Environment {
     fn ack_mode(&self) -> recv::shared::AckMode {
         Default::default()
     }
+
+    #[inline]
+    fn ack_offload(&self) -> Option<Arc<recv::ack_offload::Offload>> {
+        None
+    }
     fn reader_rt(&self) -> runtime::ArcHandle<Self::Subscriber>;
     fn spawn_reader<F: 'static + Send + Future<Output = ()>>(&self, f: F);
     fn writer_rt(&self) -> runtime::ArcHandle<Self::Subscriber>;
@@ -104,6 +109,13 @@ where
         match self {
             Either::A(a) => a.ack_mode(),
             Either::B(b) => b.ack_mode(),
+        }
+    }
+
+    fn ack_offload(&self) -> Option<Arc<recv::ack_offload::Offload>> {
+        match self {
+            Either::A(a) => a.ack_offload(),
+            Either::B(b) => b.ack_offload(),
         }
     }
 

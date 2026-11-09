@@ -8,7 +8,7 @@ use crate::{
     event, msg,
     packet::{stream, Packet},
     stream::{
-        recv::{self, buffer::Buffer as _},
+        recv::{self, ack_offload::Offload, buffer::Buffer as _},
         shared::{self, handshake, AcceptState, ArcShared, ShutdownKind},
         socket::{self, Socket},
         Actor, TransportFeatures,
@@ -36,7 +36,7 @@ use std::{
     io,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
-        Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard,
     },
 };
 
@@ -56,6 +56,12 @@ pub enum AckMode {
     /// server that handles the request before yielding holds the ACK back and can trigger
     /// spurious retransmissions on the peer.
     Deferred,
+    /// The endpoint's ACK thread sends ACKs while the read returns.
+    ///
+    /// Intended for servers: unlike [`AckMode::Deferred`], the ACK doesn't wait for the reading
+    /// task to yield. Falls back to [`AckMode::Application`] for streams whose environment
+    /// wasn't configured with this mode, since it has no ACK thread.
+    Offload,
 }
 
 pub enum ApplicationState {
@@ -164,6 +170,7 @@ impl State {
     pub fn application_guard<'a, Sub>(
         &'a self,
         ack_mode: AckMode,
+        ack_offload: Option<&'a Arc<Offload>>,
         send_buffer: &'a mut msg::send::Message,
         shared: &'a ArcShared<Sub>,
         sockets: &'a socket::ArcApplication,
@@ -186,6 +193,7 @@ impl State {
         Ok(AppGuard {
             inner,
             ack_mode,
+            ack_offload,
             send_buffer,
             shared,
             sockets,
@@ -275,6 +283,7 @@ where
 {
     inner: ManuallyDrop<MutexGuard<'a, Inner>>,
     ack_mode: AckMode,
+    ack_offload: Option<&'a Arc<Offload>>,
     send_buffer: &'a mut msg::send::Message,
     shared: &'a ArcShared<Sub>,
     sockets: &'a socket::ArcApplication,
@@ -303,12 +312,16 @@ where
                 self.defer_ack = self.inner.receiver.should_transmit();
                 return false;
             }
-            AckMode::Deferred => AckMode::Application,
+            AckMode::Offload if self.ack_offload.is_some() => {
+                self.defer_ack = self.inner.receiver.should_transmit();
+                return false;
+            }
+            AckMode::Deferred | AckMode::Offload => AckMode::Application,
             ack_mode => ack_mode,
         };
 
         match ack_mode {
-            AckMode::Application | AckMode::Deferred => {
+            AckMode::Application | AckMode::Deferred | AckMode::Offload => {
                 self.inner
                     .fill_transmit_queue(self.shared, self.send_buffer);
 
@@ -376,7 +389,12 @@ where
         }
 
         if self.defer_ack {
-            deferred_ack::schedule(self.shared, self.sockets);
+            match (self.ack_mode, self.ack_offload) {
+                (AckMode::Offload, Some(offload)) => {
+                    deferred_ack::offload(offload, self.shared, self.sockets)
+                }
+                _ => deferred_ack::schedule(self.shared, self.sockets),
+            }
         }
 
         // no need to look at anything if the state didn't change
@@ -822,7 +840,24 @@ mod deferred_ack {
     {
     }
 
-    #[cfg(feature = "tokio")]
+    #[inline]
+    pub fn offload<Sub>(
+        offload: &Offload,
+        shared: &ArcShared<Sub>,
+        sockets: &socket::ArcApplication,
+    ) where
+        Sub: event::Subscriber,
+    {
+        if shared.receiver.deferred_ack.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let shared = shared.clone();
+        let sockets = sockets.clone();
+        if let Err(job) = offload.submit(Box::new(move || send(&shared, &sockets))) {
+            job();
+        }
+    }
+
     fn send<Sub>(shared: &ArcShared<Sub>, sockets: &socket::ArcApplication)
     where
         Sub: event::Subscriber,

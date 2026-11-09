@@ -56,6 +56,7 @@ where
     send_buffer: msg::send::Message,
     read_mode: ReadMode,
     ack_mode: AckMode,
+    ack_offload: Option<std::sync::Arc<recv::ack_offload::Offload>>,
     timer: Option<Timer>,
     local_state: LocalState,
     runtime: runtime::ArcHandle<Sub>,
@@ -270,6 +271,7 @@ where
 
         let mut reader = shared.receiver.application_guard(
             self.ack_mode,
+            self.ack_offload.as_ref(),
             &mut self.send_buffer,
             shared,
             sockets,

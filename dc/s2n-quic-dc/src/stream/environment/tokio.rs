@@ -6,7 +6,7 @@ use crate::{
     event,
     stream::{
         environment::udp::Config as PoolConfig,
-        recv::shared::AckMode,
+        recv::{ack_offload::Offload, shared::AckMode},
         runtime::{tokio as runtime, ArcHandle},
         server::accept,
         socket,
@@ -126,6 +126,14 @@ where
         });
         let thread_name_prefix = thread_name_prefix.as_deref().unwrap_or("dc_quic");
 
+        let ack_offload = if matches!(ack_mode, AckMode::Offload) {
+            Some(Arc::new(Offload::new(format!(
+                "{thread_name_prefix}::ack"
+            ))?))
+        } else {
+            None
+        };
+
         let make_rt = |suffix: &str| {
             let mut builder = tokio::runtime::Builder::new_multi_thread();
             Ok(builder
@@ -148,6 +156,7 @@ where
             gso,
             socket_options,
             ack_mode,
+            ack_offload,
             reader_rt,
             writer_rt,
             recv_pool: None,
@@ -169,6 +178,7 @@ pub struct Environment<Sub> {
     gso: features::Gso,
     socket_options: socket::Options,
     ack_mode: AckMode,
+    ack_offload: Option<Arc<Offload>>,
     reader_rt: runtime::Shared<Sub>,
     writer_rt: runtime::Shared<Sub>,
     subscriber: Sub,
@@ -230,6 +240,11 @@ where
     #[inline]
     fn ack_mode(&self) -> AckMode {
         self.ack_mode
+    }
+
+    #[inline]
+    fn ack_offload(&self) -> Option<Arc<Offload>> {
+        self.ack_offload.clone()
     }
 
     #[inline]
