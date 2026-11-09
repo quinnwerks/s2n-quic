@@ -144,6 +144,7 @@ pub struct State {
     pub max_data: VarInt,
     pub local_max_data_window: VarInt,
     pub peer_activity: Option<PeerActivity>,
+    pub blocked_since: Option<Timestamp>,
     pub max_datagram_size: u16,
     pub max_sent_segment_size: u16,
     pub is_reliable: bool,
@@ -199,6 +200,7 @@ impl State {
             max_data: initial_max_data,
             local_max_data_window: local_max_data,
             peer_activity: None,
+            blocked_since: None,
             max_datagram_size,
             max_sent_segment_size: 0,
             is_reliable: stream_id.is_reliable,
@@ -402,6 +404,7 @@ impl State {
                         );
 
                         self.max_data = frame.maximum_data;
+                        self.blocked_since = None;
                     }
                 }
                 FrameMut::ConnectionClose(close) => {
@@ -765,7 +768,12 @@ impl State {
         };
 
         if newly_acked_packets {
-            self.reset_pto_timer();
+            if self.is_idle_at_peer_limit() {
+                // keep backing off so probing a peer that's still not reading stays cheap
+                self.pto.cancel();
+            } else {
+                self.reset_pto_timer();
+            }
         }
 
         // force probing when we've sent all of the data but haven't got an ACK for the final
@@ -839,6 +847,13 @@ impl State {
     }
 
     #[inline]
+    fn is_idle_at_peer_limit(&self) -> bool {
+        self.state.is_sending()
+            && self.max_sent_offset >= self.max_data
+            && !self.has_inflight_packets()
+    }
+
+    #[inline]
     fn update_idle_timer(&mut self, clock: &impl Clock) {
         ensure!(!self.idle_timer.is_armed());
 
@@ -855,6 +870,15 @@ impl State {
 
         // if we've sent all of the data/reset and are waiting to clean things up
         should_arm |= self.state.is_data_sent() || self.state.is_reset_sent();
+
+        if self.is_idle_at_peer_limit() {
+            // the peer only sends MAX_DATA in response to our packets, so probe it or a lost
+            // update leaves the stream blocked. Stop after an idle timeout so a peer that never
+            // reads still times out.
+            let now = clock.get_time();
+            let blocked_since = *self.blocked_since.get_or_insert(now);
+            should_arm |= now < blocked_since + self.idle_timeout;
+        }
 
         ensure!(should_arm);
 
