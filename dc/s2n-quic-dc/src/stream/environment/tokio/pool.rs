@@ -263,7 +263,8 @@ impl Pool {
             let queue = if let Some(shared_queue) = &shared_queue {
                 shared_queue.clone()
             } else {
-                Queues::new(stream_cap, control_cap)
+                // queue_id 0 routes to the acceptor, so it must never be assigned to a stream
+                Queues::new_non_zero(stream_cap, control_cap)
             };
 
             let socket = Socket::new(socket, queue)?;
